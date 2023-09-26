@@ -2,6 +2,8 @@ import os
 import sys
 import arcpy
 import logging
+from collections import namedtuple
+
 from typing import (List, Union)
 numeric = Union[int, float]
 from toolbox_utils.messages_print import aprint, log_it, setup_logging # log_it printuje jak do arcgis console tak do souboru
@@ -46,18 +48,37 @@ class CheckAgainstDMP(object):
             name='in_geom',
             displayName='In PolygonZ',
             direction='Input',
-            datatype='GPLayer',
+            datatype=['GPFeatureLayer', 'DEFeatureClass'],
             parameterType='Required',
             enabled='True'
             )
-
-
         
+        calculate_zonal_table_flag = arcpy.Parameter(
+            name='calculate_zonal_table_flag',
+            displayName='Calculate zonal table and fields?',
+            direction='Input',
+            datatype='GPBoolean',
+            parameterType='Optional',
+            enabled='True'
+        )
+        
+        update_fields_flag = arcpy.Parameter(
+            name='update_fields_flag',
+            displayName='Update fields based on zonal table?',
+            direction='Input',
+            datatype='GPBoolean',
+            parameterType='Optional',
+            enabled='True'
+        )
+        
+
+
+        # TODO - uncoment whern running as a tool
         log_file_path.value = os.path.dirname(arcpy.mp.ArcGISProject("CURRENT").filePath)
-        input_DMP.value = r"I:\04_Hall_of_Fame\11_Honza_H\00_Projekty\26_Aktualizace_3D_dat\01_Developement\gis\26_Aktualizace_3D_dat\26_Aktualizace_3D_dat.gdb\sumavska_test_dmp"
+        input_DMP.value = r"I:\04_Hall_of_Fame\11_Honza_H\00_Projekty\29_Plackova_aktualizace_3d_modelu\01_Developement\gis\29_Plackova_aktualizace_3d_modelu\29_Plackova_aktualizace_3d_modelu.gdb\sumavska_test_dmp"
         # output_PolyZ_workspace.filter.list = ["Local Database"]
 
-        params = [log_file_path, input_DMP, input_PolygonZ_geometery]
+        params = [log_file_path, input_DMP, input_PolygonZ_geometery, calculate_zonal_table_flag, update_fields_flag]
 
         return params
 
@@ -130,143 +151,142 @@ def tableExists(table_name: str) -> bool:
     # TODO - make optional to create zonal statistics 
     return table_name in [table for table in arcpy.ListTables(table_name)]    
 
+def getMinConsecutive(heights: list) -> float:
+    heights = [1.2, 2.3, 1.2, 3.1, 3.1, 4.0, 2.5, 2.5]
+
+    min_height = None
+    found_indices = []
+
+    for i in range(len(heights) - 1):
+        if heights[i] == heights[i + 1]:
+            if min_height is None or heights[i] < min_height:
+                min_height = heights[i]
+                found_indices = [i, i + 1]
+            elif heights[i] == min_height:
+                found_indices.append(i + 1)
+
+    if found_indices:
+        return found_indices
+    else:
+        log_it("No consecutive identical minimum heights found.", 'info', __name__)
 
 
-def check_flying_buildings(input_fc:str, ground_dmr:str, workspace:str = None) -> None:
-    ''' Updates values for DTM_diff  a DTM_diff_val. Checks if feature is under or over specified terrain.'''
+
+def calculate_diff_attributes(input_fc:str, ground_dmr:str, workspace:str = None):
+    # Define a named tuple for your columns
     log_it(f'-'*15, 'info', __name__)
     log_it(f'Updating featureclasses with height attributes.', 'info', __name__)
-   
-    # cols = ['RIMSA_VYSKA', 'MIN', 'MAX','DTM_diff_min_max_flatness', 'DTM_diff_max_info', 'ID_SEG','DTM_diff_min_info','DTM_diff_min','DTM_diff_max']
-    cols = ['SHAPE@', 'ID_PLO','RIMSA_VYSKA', 'MIN','MAX', 'DTM_diff_min', 'DTM_diff_max', 'AVG_height_of_verts']
-    bad_seg_ids = []
+    RowData = namedtuple('RowData', ['shape', 'min', 'max', 'mean', 'avg_verts', 'diff_avg_verts_dmp_min', 'diff_avg_verts_dmp_max', 'diff_avg_verts_dmp_mean'])
+
+    # Example usage in your code
+    cols = ['SHAPE@', 'MIN', 'MAX', 'MEAN', 'AVG_VERTS', 'DIFF_AVG_VERTS_DMP_MIN', 'DIFF_AVG_VERTS_DMP_MAX', 'DIFF_AVG_VERTS_DMP_MEAN']
     sql_expression = "PLOCHA_KOD IN (3, 2)"
-
-
-
 
     with arcpy.da.UpdateCursor(input_fc, cols, where_clause=sql_expression) as cursor:
         for row in cursor:
-            attrs = [att for att in row]
+            # Create a named tuple from the row data
+            data = RowData(*row)
 
-            polygon = row[0]
-
-
+            shape_geometry_attr = data.shape
+            verts_z_mean = data.avg_verts
 
             z_vals = []
-            for part in polygon:
-                for point in part:
-                    x, y, z = point.X, point.Y, point.Z
+            for shape_part in shape_geometry_attr:
+                for shape_vertex in shape_part:
+                    x, y, z = shape_vertex.X, shape_vertex.Y, shape_vertex.Z
                     z_vals.append(z)
-                    log_it(f"X: {x}, Y: {y}, Z: {z}", 'info', __name__)
                 z_mean = sum(z_vals) / len(z_vals)
-                row[-1] = z_mean
 
-            cursor.updateRow(row)
-
-            row[-2] = row[4] - row[-1]  
-
-            cursor.updateRow(row)
-
-
-
-
-    # with arcpy.da.UpdateCursor(input_fc, cols, where_clause=sql_expression) as cur:
-    #     for row in cur:
-    #         atrs = [attr for attr in row]
-    #         dtm_diff_min= row[0] - row[1]
-    #         dtm_diff_max = row[0] - row[2]
-    #         row[-2] = dtm_diff_min
-    #         row[-1] = dtm_diff_max
-    #         log_it(f'{row[0]}, {row[1]}, {row[2]}, {row[3]}, {row[4]}', 'info', __name__)
+                # TODO - more detailed calculations
+                # # vert with min height
+                # z_min = min(z_vals)
+                # # min line 
+                # min_line = getMinConsecutive(z_vals)
+                # # vert with max height
+                # z_max = max(z_vals)
+                log_it(f"Calculate avg_height of verticies", 'info', __name__)
             
-            # if dtm_diff_min > 0:
-            #     row[-3] = 'PATA_SEG_VYSKA je nad DTM'
-            # elif dtm_diff_min < 0:
-            #     row[-3] = 'PATA_SEG_VYSKA je pod DTM'
-            # else:
-            #     row[-3] = 'PATA_SEG_VYSKA odpovida DTM'
+            dmp_diff_min = data.min - z_mean
+            log_it(f"Calculate difference between avg_height of verticies and DMP min height for the given zone", 'info', __name__)
+
+            dmp_diff_max = data.max - z_mean
+            log_it(f"Calculate difference between avg_height of verticies and DMP max height for the given zone", 'info', __name__)
+
+            dmp_diff_mean = data.mean - z_mean
+            log_it(f"Calculate difference between avg_height of verticies and DMP avg height for the given zone", 'info', __name__)
+
+            # Update the named tuple and assign it back to the row
+            data = data._replace(avg_verts=z_mean, diff_avg_verts_dmp_min=dmp_diff_min, diff_avg_verts_dmp_max=dmp_diff_max, diff_avg_verts_dmp_mean=dmp_diff_mean)
+
+            # Update the row with the modified named tuple
+            cursor.updateRow(tuple(data))
 
 
-            # if dtm_diff_max >= 0:
-            #     # log_it(f'{dtm_diff_max}', 'info', __name__)
-            #     row[-1] = dtm_diff_max
-                # row[3] = row[2] -  row[1]
-                # if dtm_diff_max >= 0.5:
-                #     bad_seg_ids.append(int(row[5]))
+def get_field_names(fc) -> list:
+    return [f.name for f in arcpy.ListFields(fc)]
 
-        
-            # if dtm_diff_max > 0:
-            #     row[4] = 'Celý segment je nad terénem'
-            # elif dtm_diff_max == 0:
-            #     row[4] = 'Segment sedí na terénu alespoň jedním bodem'
-            # else:
-            #     # momentálně není možné
-            #     row[4] == 'Segment je pod terénem'    
-            
 
-            # cur.updateRow(row)
+def calculate_zonal_fields(fc: str, zonal_stats_table_name: str, key_field: str, workspace: str, input_dmp, run_flag: bool, update_attr_flag:bool) -> None:
     
-    # log_it(f'Checking {input_fc}...', 'info', __name__)
-    # log_it(f'Všechny body podstavy segmentu jsou výše nežli 0.5 m nad DMT ID_SEG: {bad_seg_ids}', 'warning', __name__)
+    if(run_flag):
+        arcpy.env.workspace = workspace
+        out_table = os.path.join(workspace, zonal_stats_table_name)
+
+        if not tableExists(zonal_stats_table_name):
+            log_it('Creating new zonal table...', 'info', __name__)
+            sql_expression = "PLOCHA_KOD IN (3, 2)"
+            building_roofs = arcpy.management.SelectLayerByAttribute(fc, "NEW_SELECTION", sql_expression)
+
+            log_it(f'{out_table}', 'info', __name__)
+            log_it('Creating Zonal statistic table...', 'info', __name__)
+            # Summarizes the values of a raster within the zones of another dataset and reports the results as a table.
+            arcpy.sa.ZonalStatisticsAsTable(building_roofs, key_field, input_dmp, out_table, statistics_type='MIN_MAX_MEAN')
+        else:
+            log_it(f'Zonal Statistics for given {fc} in {workspace} were already calculated if you wish to recalculate them choose another output workspace or delete existing zonal table', 'info', __name__)
+
+
+        if update_attr_flag:
+            arcpy.management.DeleteField(fc, ['MIN', 'MAX', 'MEAN', 'AVG_VERTS','DIFF_AVG_VERTS_DMP_MIN', 'DIFF_AVG_VERTS_DMP_MAX', 'DIFF_AVG_VERTS_DMP_MEAN'])
+            log_it(f'Fields to be updated deleted', 'info', __name__)
+
+
+        if not fieldExists(fc, 'MIN') and not fieldExists(fc, 'MAX') and not fieldExists(fc, 'MEAN'):
+            arcpy.management.JoinField(fc, key_field, out_table, key_field, ['MIN', 'MAX', 'MEAN'])
+            arcpy.management.AddField(fc, 'AVG_VERTS', 'DOUBLE')
+            arcpy.management.AddField(fc, 'DIFF_AVG_VERTS_DMP_MIN', 'DOUBLE')
+            arcpy.management.AddField(fc, 'DIFF_AVG_VERTS_DMP_MAX', 'DOUBLE')
+            arcpy.management.AddField(fc, 'DIFF_AVG_VERTS_DMP_MEAN', 'DOUBLE')
+
+            log_it(f'Required fields were created in {fc}', 'info', __name__)
+        else:
+            log_it(f'Field MIN and MAX already exist in {fc}. Fields MIN, MAX, MEAN, and AVG_VERTS have been updated from the ZonalTable', 'info', __name__)
+    else: 
+        log_it(f'Atrributes havent been calculated because of user choice, change flag for running the raster calculation.', 'info', __name__)
 
 
 
-def check_tables_and_fields(fc: str, zonal_stats_table_name: str, key_field: str, workspace: str, input_dmp) -> None:
-    '''Checks if in specified workspace exists a table or fields in existing fc if not creates them.'''
-    arcpy.env.workspace = workspace
-    out_table = os.path.join(workspace, zonal_stats_table_name)
-
-    if not tableExists(zonal_stats_table_name):
-        log_it('Creating new zonal table...', 'info', __name__)
-        sql_expression = "PLOCHA_KOD IN (3, 2)"
-        building_roofs = arcpy.management.SelectLayerByAttribute(fc, "NEW_SELECTION", sql_expression)
-
-        log_it(f'{out_table}', 'info', __name__)
-        log_it('Creating Zonal statistic table...', 'info', __name__)
-        arcpy.sa.ZonalStatisticsAsTable(building_roofs, key_field, input_dmp, out_table, statistics_type='MIN_MAX_MEAN')
-    else:
-        log_it(f'Zonal Statistics for given {fc} in {workspace} were already calculated if you wish to recalculate them choose another output workspace', 'info', __name__)
-
-    if not fieldExists(fc, 'MIN') and not fieldExists(fc, 'MAX'):
-        arcpy.management.JoinField(fc, key_field, out_table, key_field, 'MIN')
-        arcpy.management.JoinField(fc, key_field, out_table, key_field, 'MAX')
-        arcpy.management.AddField(fc, 'AVG_height_of_verts', 'DOUBLE')
-        arcpy.management.AddField(fc, 'DTM_diff_min', 'DOUBLE')
-        arcpy.management.AddField(fc, 'DTM_diff_min_info', 'TEXT')
-        arcpy.management.AddField(fc, 'DTM_diff_max', 'DOUBLE')
-        arcpy.management.AddField(fc, 'DTM_diff_max_info', 'TEXT')
-        arcpy.management.AddField(fc, 'DTM_diff_min_max_flatness', 'DOUBLE')
-        
-        log_it(f'Required fields were created in {fc}', 'info', __name__)
-    else:
-        log_it(f'Field MIN and MAX already exists in {fc}. Fields MIN, MAX wont be joined from ZonalTable', 'info', __name__)
-
-
-
-def main(log_dir_path: str, input_DMP: str, input_polygonZ_geometry: str, *args) -> None:
+def main(log_dir_path: str, input_DMP: str, input_polygonZ_geometry: str, calculate_zonal_table_flag:bool, update_fields_flag:bool) -> None:
     '''
     Main runtime.
     '''
- 
     arcpy.CheckOutExtension("Spatial")
 
     # setup file logging
     init_logging(log_dir_path)
 
-
-    log_it(f'{input_polygonZ_geometry}', 'info', __name__)
-    log_it(f'{type(input_polygonZ_geometry)}', 'info', __name__)
-    log_it(f'{arcpy.env.workspace}', 'info', __name__)
+    # fc = get_fc_from_gdb_direct(input_polygonZ_geometry)
+    
+    log_it(f'{input_polygonZ_geometry}', 'info', __name__ )
 
     key_field = 'OBJECTID'
-    output_fc_name = input_polygonZ_geometry
-    zonal_stats_table_name = f'{output_fc_name}_zonal_stat_base'
-    check_tables_and_fields(output_fc_name, zonal_stats_table_name, key_field, arcpy.env.workspace, input_DMP)
+    zonal_stats_table_name = f'{input_polygonZ_geometry}_zonal_stat_base_test'
+
+    clear_selection(input_polygonZ_geometry)
+    calculate_zonal_fields(input_polygonZ_geometry, zonal_stats_table_name, key_field, arcpy.env.workspace, input_DMP, calculate_zonal_table_flag, update_fields_flag)
 
 
-    clear_selection(output_fc_name)
-    check_flying_buildings(output_fc_name, input_DMP, arcpy.env.workspace)
+    clear_selection(input_polygonZ_geometry)
+    calculate_diff_attributes(input_polygonZ_geometry, input_DMP, arcpy.env.workspace)
 
 ##################################################
 ############ Run the tool from IDE ###############
@@ -277,7 +297,14 @@ def main(log_dir_path: str, input_DMP: str, input_polygonZ_geometry: str, *args)
 # imtpw = r"I:\04_Hall_of_Fame\11_Honza_H\00_Projekty\12_3D_model_validation_refactoring\02_Input_Data\TopGIS_clean\Lokalita_43_2022_08_11"
 # raster = r'I:\01_Data\02_Prirodni_pomery\04_Vyskopis\Brno\DMR_DMT\TOPGIS\2019\04_GIS\rastr\rastr\DMT2019\DTM_2019_L_025m.tif'
 # omptw = r'I:\04_Hall_of_Fame\11_Honza_H\00_Projekty\12_3D_model_validation_refactoring\01_Developement\02_Output\new_output_workspaces\polyZ_workspace.gdb'
-# log_file_path = r'I:\04_Hall_of_Fame\11_Honza_H\00_Projekty\12_3D_model_validation_refactoring\01_Developement\02_Output\test_logs'  # bude parameter
-# main(log_dir_path=log_file_path, input_DMP=raster, location_root_folder_paths=imtpw, path_to_copy_analysis_workspace=omptw)
+
+# log_file_path = r'I:\04_Hall_of_Fame\11_Honza_H\00_Projekty\29_Plackova_aktualizace_3d_modelu\01_Developement\gis\29_Plackova_aktualizace_3d_modelu'  # bude parameter
+# input_DMP = r'I:\04_Hall_of_Fame\11_Honza_H\00_Projekty\29_Plackova_aktualizace_3d_modelu\01_Developement\gis\29_Plackova_aktualizace_3d_modelu\29_Plackova_aktualizace_3d_modelu.gdb\sumavska_test_dmp'
+# input_polygonZ_geometry = r'I:\04_Hall_of_Fame\11_Honza_H\00_Projekty\29_Plackova_aktualizace_3d_modelu\01_Developement\gis\29_Plackova_aktualizace_3d_modelu\29_Plackova_aktualizace_3d_modelu.gdb'
+# calculate_zonal_table_flag = False
+# update_fields_flag = False
+# main(log_file_path, input_DMP, input_polygonZ_geometry, calculate_zonal_table_flag, update_fields_flag)
 
 ###################################################
+
+
